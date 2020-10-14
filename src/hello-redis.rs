@@ -1,6 +1,10 @@
 use mini_redis::{client, Result};
 use tokio::sync::{mpsc, oneshot};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut, Buf};
+use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, BufWriter, AsyncWriteExt};
+use std::io::Cursor;
+use std::io;
 
 #[derive(Debug)]
 enum Comando {
@@ -12,6 +16,99 @@ enum Comando {
         key: String,
         val: Bytes,
         resp: Responder<()>,
+    }
+}
+
+enum Frame {
+    Simple(String),
+    Error(String),
+    Integer(u64),
+    Bulk(Bytes),
+    Null,
+    Array(Vec<Frame>),
+}
+
+struct Connection {
+    stream: BufWriter<TcpStream>,
+    buffer: BytesMut,
+}
+
+impl Connection {
+    pub fn new(stream: TcpStream) -> Self {
+        Connection {
+            stream: BufWriter::new(stream),
+            buffer: BytesMut::with_capacity(4096),
+        }
+    }
+
+    pub async fn read_frame(&mut self) -> mini_redis::Result<Option<Frame>> {
+        loop {
+            if let Some(frame) = self.parse_frame()? {
+                Ok(Some(frame))
+            }
+
+            let n = self.stream.read_buf(&mut self.buffer).await?;
+
+            if n == 0 {
+                // The remote closed the connection. For this to be
+                // a clean shutdown, there should be no data in the
+                // read buffer. If there is, this means that the
+                // peer closed the socket while sending a frame.
+                if self.buffer.is_empty() {
+                    return Ok(None);
+                } else {
+                    return Err("connection reset by peer".into());
+                }
+            }
+        }
+    }
+
+    async fn write_value(&mut self, frame: &Frame)
+                         -> io::Result<()>
+    {
+        match frame {
+            Frame::Simple(val) => {
+                self.stream.write_u8(b'+').await?;
+                self.stream.write_all(val.as_bytes()).await?;
+                self.stream.write_all(b"\r\n").await?;
+            }
+            Frame::Error(val) => {
+                self.stream.write_u8(b'-').await?;
+                self.stream.write_all(val.as_bytes()).await?;
+                self.stream.write_all(b"\r\n").await?;
+            }
+            Frame::Integer(val) => {
+                self.stream.write_u8(b':').await?;
+                self.write_decimal(*val).await?;
+            }
+            Frame::Null => {
+                self.stream.write_all(b"$-1\r\n").await?;
+            }
+            Frame::Bulk(val) => {
+                let len = val.len();
+
+                self.stream.write_u8(b'$').await?;
+                self.write_decimal(len as u64).await?;
+                self.stream.write_all(val).await?;
+                self.stream.write_all(b"\r\n").await?;
+            }
+            Frame::Array(_val) => unimplemented!(),
+        }
+
+        self.stream.flush().await;
+
+        Ok(())
+    }
+
+    pub async fn write_frame(&mut self, frame: &Frame)
+        -> mini_redis::Result<()> {
+        match frame {
+            Frame::Simple(val) => {
+                self.stream.write_u8(b'+').await?;
+                self.stream.write_all(val.as_bytes()).await?;
+                self.stream.write_all(b"\r\n").await?;
+            }
+        }
     }
 }
 

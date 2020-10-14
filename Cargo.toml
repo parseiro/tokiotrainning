@@ -10,7 +10,13 @@ edition = "2018"
 tokio = { version = "0.2", features = ["full"] }
 mini-redis = "0.2"
 bytes = "0.5"
+futures = "0.3.6"
+crossbeam = "0.7"
 
 [[example]]
 name = "hello-redis"
 path = "src/hello-redis.rs"
+
+[[example]]
+name = "minitokio"
+path = "src/minitokio.rs"
